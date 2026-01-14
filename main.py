@@ -9,17 +9,27 @@ import os
 import json
 from flask import Flask
 
-# --- 1. ตั้งค่าตัวแปร ---
-TOKEN = os.environ.get('BOT_TOKEN')
-GROUP_ID_ADMIN = str(os.environ.get('GROUP_ID_ADMIN'))
+# --- 1. ส่วน Server หลอกๆ (กันหลับบน Render) ---
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Bot is running OK!"
+
+def run_web_server():
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port)
+
+# --- 2. ตั้งค่าตัวแปร ---
+BOT_TOKEN = os.environ.get('BOT_TOKEN')
 GROUP_ID_MONTHLY = str(os.environ.get('GROUP_ID_MONTHLY'))
+GROUP_ID_ADMIN = str(os.environ.get('GROUP_ID_ADMIN'))
 SHEET_NAME = os.environ.get('SHEET_NAME', 'Members')
 PAYMENT_SHEET_NAME = "VVIP_Data"
 
-bot = telebot.TeleBot(TOKEN)
-app = Flask(__name__)
+bot = telebot.TeleBot(BOT_TOKEN)
 
-# --- 2. ฟังก์ชันเวลาไทย ---
+# --- 3. ฟังก์ชันเวลาไทย ---
 def get_thai_time():
     tz = pytz.timezone('Asia/Bangkok')
     return datetime.datetime.now(tz)
@@ -27,17 +37,18 @@ def get_thai_time():
 def format_date(date_obj):
     return date_obj.strftime("%Y-%m-%d %H:%M:%S")
 
-# --- 3. เชื่อมต่อ Google Sheet ---
+# --- 4. เชื่อมต่อ Google Sheets ---
 def get_sheets():
     try:
         creds_json = os.environ.get('GOOGLE_KEY_JSON')
         if not creds_json: return None, None
+        
         try:
             creds_dict = json.loads(creds_json)
         except:
             fixed_json = creds_json.replace('\n', '\\n')
             creds_dict = json.loads(fixed_json)
-        
+
         scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         client = gspread.authorize(creds)
@@ -47,6 +58,8 @@ def get_sheets():
             s_pay = client.open(PAYMENT_SHEET_NAME).sheet1
         except:
             s_pay = None
+        
+        print("✅ Google Sheet Connected!")
         return s_main, s_pay
     except Exception as e:
         print(f"❌ Connect Error: {e}")
@@ -54,69 +67,7 @@ def get_sheets():
 
 sheet, sheet_payment = get_sheets()
 
-# --- 4. ฟังก์ชันเตะคน (Kick Logic) ---
-def run_expiry_check():
-    global sheet
-    if sheet is None: sheet, _ = get_sheets()
-    if sheet is None: return "❌ เชื่อมต่อ Sheet ไม่ได้"
-
-    try:
-        records = sheet.get_all_records()
-        now = get_thai_time().replace(tzinfo=None)
-        kicked_count = 0
-        log_msg = []
-
-        # เริ่มเช็คทีละแถว (เริ่มแถว 2)
-        for i, record in enumerate(records, start=2):
-            status = record.get('Status', '')
-            expiry_str = record.get('Expiry Date', '')
-            uid = str(record.get('User ID', ''))
-            name = record.get('Name', 'Unknown')
-
-            # ต้องเป็น Active และมีวันหมดอายุ
-            if status == 'Active' and expiry_str and expiry_str != '-':
-                try:
-                    exp_date = datetime.datetime.strptime(expiry_str, "%Y-%m-%d %H:%M:%S")
-                    
-                    # ถ้าเวลาปัจจุบัน เลยเวลาหมดอายุแล้ว
-                    if now > exp_date:
-                        print(f"🚫 Kicking: {name}")
-                        try:
-                            # 1. เตะออกจากกลุ่ม
-                            bot.ban_chat_member(GROUP_ID_MONTHLY, uid)
-                            # 2. ปลดแบนทันที (เพื่อให้เข้าใหม่ได้ในอนาคต)
-                            bot.unban_chat_member(GROUP_ID_MONTHLY, uid)
-                            # 3. แก้สถานะใน Sheet เป็น Expired
-                            sheet.update_cell(i, 5, 'Expired') 
-                            
-                            kicked_count += 1
-                            log_msg.append(f"🚫 เตะ: {name}")
-                        except Exception as e:
-                            log_msg.append(f"⚠️ เตะพลาด {name}: {e}")
-                except: continue
-
-        if kicked_count > 0:
-            return f"🧹 **ระบบเตะทำงาน**\n" + "\n".join(log_msg)
-        return None # ไม่มีใครโดนเตะ ไม่ต้องแจ้ง
-
-    except Exception as e:
-        print(f"Check Error: {e}")
-        return None
-
-# --- 5. ระบบเตะอัตโนมัติ (วนลูปทุก 60 วิ) ---
-def auto_kick_loop():
-    print("⏳ Auto-Kick Loop Started...")
-    while True:
-        try:
-            result = run_expiry_check()
-            if result: # ถ้ามีการเตะเกิดขึ้น ให้แจ้งแอดมิน
-                bot.send_message(GROUP_ID_ADMIN, result)
-            time.sleep(60) # พัก 1 นาที
-        except Exception as e:
-            print(f"Loop Error: {e}")
-            time.sleep(10)
-
-# --- 6. เช็ค VVIP ---
+# --- 5. เช็ค VVIP ---
 def check_is_vvip(user_id):
     global sheet_payment
     if sheet_payment is None: _, sheet_payment = get_sheets()
@@ -133,84 +84,128 @@ def check_is_vvip(user_id):
         return False
     except: return False
 
-# --- 7. บันทึกลง Sheet ---
-def save_member_to_sheet(user):
-    global sheet
-    if sheet is None: sheet, _ = get_sheets()
-    if sheet is None: return
-
-    try:
-        now_thai = get_thai_time()
-        is_perm = check_is_vvip(user.id)
-        
-        if is_perm:
-            expiry_str, status_str = "-", "Permanent"
-            msg = f"✅ ลูกค้าใหม่ (ถาวร 999+): {user.first_name}\nสถานะ: ถาวรตลอดชีพ"
-        else:
-            expiry = now_thai + datetime.timedelta(days=30)
-            expiry_str, status_str = format_date(expiry), "Active"
-            msg = f"✅ ลูกค้าใหม่ (รายเดือน): {user.first_name}\nหมดอายุ: {expiry_str}"
-
-        sheet.append_row([str(user.id), user.first_name, format_date(now_thai), expiry_str, status_str])
-        print(f"💾 Saved {user.first_name}")
-        bot.send_message(GROUP_ID_ADMIN, msg)
-    except Exception as e:
-        print(f"❌ Save Error: {e}")
-
-# --- 8. Event Listener (Dual Mode) ---
+# --- 6. Event: คนเข้ากลุ่ม (ของจริง) ---
 @bot.chat_member_handler()
-def on_status_change(update):
+def on_member_change(update):
     if str(update.chat.id) == GROUP_ID_MONTHLY:
-        # ถ้าเพิ่งเข้ามาใหม่
+        # ถ้าเป็นการเข้ากลุ่มใหม่ (member/admin/creator)
         if update.new_chat_member.status in ['member', 'administrator', 'creator']:
+            # เช็คว่าเดิมไม่ได้อยู่ (กันซ้ำ)
             if update.old_chat_member.status not in ['member', 'administrator', 'creator']:
-                save_member_to_sheet(update.new_chat_member.user)
+                
+                user = update.new_chat_member.user
+                if user.is_bot: return
 
-@bot.message_handler(content_types=['new_chat_members'])
-def on_join_message(message):
-    if str(message.chat.id) == GROUP_ID_MONTHLY:
-        for user in message.new_chat_members:
-            if not user.is_bot:
-                save_member_to_sheet(user)
+                now_thai = get_thai_time()
+                is_permanent = check_is_vvip(user.id)
+                
+                if is_permanent:
+                    expiry_str, status_str = "-", "Permanent"
+                    msg = f"✅ ลูกค้าใหม่ (ถาวร 999+): {user.first_name}\nสถานะ: ถาวรตลอดชีพ"
+                else:
+                    expiry = now_thai + datetime.timedelta(days=30)
+                    expiry_str, status_str = format_date(expiry), "Active"
+                    msg = f"✅ ลูกค้าใหม่ (รายเดือน): {user.first_name}\nหมดอายุ: {expiry_str}"
 
-# --- 9. คำสั่ง Test (Admin Only) ---
-@bot.message_handler(commands=['test_join', 'test_expired', 'run_check'])
-def admin_cmds(message):
-    if str(message.chat.id) != GROUP_ID_ADMIN: return
+                # บันทึก
+                global sheet
+                if sheet is None: sheet, _ = get_sheets()
+                if sheet:
+                    try:
+                        sheet.append_row([str(user.id), user.first_name, format_date(now_thai), expiry_str, status_str])
+                        bot.send_message(GROUP_ID_ADMIN, msg)
+                    except Exception as e:
+                        print(f"Save Error: {e}")
 
-    # เช็คสถานะบอท
-    if message.text.startswith('/test_join'):
-        bot.reply_to(message, "✅ Bot Ready (Auto-Kick & Dual Mode)")
-
-    # สั่งเช็คเตะเดี๋ยวนี้
-    elif message.text.startswith('/run_check'):
-        bot.reply_to(message, "⏳ กำลังเช็ครายชื่อคนหมดอายุ...")
-        res = run_expiry_check()
-        if res: bot.reply_to(message, res)
-        else: bot.reply_to(message, "✅ ปกติ: ไม่มีใครหมดอายุ")
-
-    # แกล้งหมดอายุ (เพื่อทดสอบการเตะ)
-    elif message.text.startswith('/test_expired'):
+# --- 7. คำสั่ง Test Join (จำลอง 1 นาที) ---
+@bot.message_handler(commands=['test_join'])
+def test_simulation(message):
+    if str(message.chat.id) == GROUP_ID_ADMIN:
         user = message.from_user
         now_thai = get_thai_time()
-        yesterday = now_thai - datetime.timedelta(days=1) # ย้อนเวลาไปเมื่อวาน
-        yesterday_str = format_date(yesterday)
         
+        is_permanent = check_is_vvip(user.id)
+        
+        if is_permanent:
+             expiry_str = "-"
+             status_str = "Permanent"
+             resp = "✅ (Test) พบยอด 999+ (ลงชีทแบบถาวร)"
+        else:
+             # ตั้งเวลาหมดอายุแค่ 1 นาที (เพื่อนับถอยหลังรอเตะ)
+             expiry = now_thai + datetime.timedelta(minutes=1)
+             expiry_str = format_date(expiry)
+             status_str = "Active"
+             resp = f"✅ (Test) ไม่พบยอด (ลงชีทแบบ 1 นาที)\n💀 จะหมดอายุตอน: {expiry_str}"
+
         global sheet
         if sheet is None: sheet, _ = get_sheets()
         if sheet:
-            # เพิ่มชื่อคนกดคำสั่งลงชีท แต่ใส่วันหมดอายุเป็น "เมื่อวาน"
-            sheet.append_row([str(user.id), user.first_name + " (TEST)", format_date(now_thai), yesterday_str, "Active"])
-            bot.reply_to(message, f"🧪 **สร้างข้อมูลทดสอบสำเร็จ!**\n👤 {user.first_name}\n📅 หมดอายุ: {yesterday_str}\n\n👉 พิมพ์ /run_check เพื่อลองเตะตัวเองได้เลย!")
+            try:
+                sheet.append_row([str(user.id), user.first_name + " (TEST)", format_date(now_thai), expiry_str, status_str])
+                bot.reply_to(message, resp)
+            except Exception as e: 
+                bot.reply_to(message, f"Error: {e}")
 
-# --- 10. Start Server ---
-@app.route('/')
-def index(): return "Bot Alive"
-def run_flask(): app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+# --- 8. Loop เช็ควันหมดอายุ (เตะคน) ---
+def check_expiry_loop():
+    print("⏳ Auto-Kick Loop Started...")
+    while True:
+        try:
+            global sheet
+            if sheet is None: sheet, _ = get_sheets()
+            if sheet:
+                records = sheet.get_all_records()
+                now = get_thai_time().replace(tzinfo=None) # ตัด Timezone เพื่อเทียบกับ String ในชีท
+                
+                for i, record in enumerate(records, start=2):
+                    # ข้ามพวกถาวร หรือพวกที่หมดอายุไปแล้ว
+                    if record['Status'] != 'Active' or record['Expiry Date'] == "-" or record['Expiry Date'] == "":
+                        continue
 
+                    try:
+                        exp_date = datetime.datetime.strptime(record['Expiry Date'], "%Y-%m-%d %H:%M:%S")
+                        
+                        # ถ้าเวลาปัจจุบัน เลยเวลาหมดอายุแล้ว
+                        if now > exp_date:
+                            uid = str(record['User ID'])
+                            name = record['Name']
+                            
+                            # เช็ค VVIP อีกรอบเผื่อเขาเติมเงินเพิ่ม (Auto Upgrade)
+                            if check_is_vvip(uid):
+                                sheet.update_cell(i, 5, 'Permanent')
+                                sheet.update_cell(i, 4, '-')
+                                bot.send_message(GROUP_ID_ADMIN, f"👑 อัปเกรดคุณ {name} เป็นถาวร (เจอยอดใหม่)")
+                                continue
+                            
+                            # ถ้าไม่เจอยอด -> เตะ!
+                            print(f"🚫 Kicking: {name}")
+                            try:
+                                bot.ban_chat_member(GROUP_ID_MONTHLY, uid)
+                                bot.unban_chat_member(GROUP_ID_MONTHLY, uid)
+                                sheet.update_cell(i, 5, 'Expired') # เปลี่ยนสถานะในชีท
+                                bot.send_message(GROUP_ID_ADMIN, f"🧹 หมดเวลา: {name} (เตะเรียบร้อย)")
+                            except Exception as e:
+                                print(f"Kick Error: {e}")
+                    except: continue
+
+            time.sleep(60) # เช็คทุก 1 นาที
+        except Exception as e:
+            print(f"Loop Error: {e}")
+            time.sleep(60)
+
+# --- 9. เริ่มทำงาน ---
 if __name__ == "__main__":
-    threading.Thread(target=run_flask).start()
-    threading.Thread(target=auto_kick_loop).start() # เปิดระบบเช็คอัตโนมัติ
+    # แยก Thread 1: ลูปเตะคน
+    t1 = threading.Thread(target=check_expiry_loop)
+    t1.daemon = True
+    t1.start()
     
+    # แยก Thread 2: Web Server (กันหลับ)
+    t2 = threading.Thread(target=run_web_server)
+    t2.daemon = True
+    t2.start()
+    
+    # งานหลัก: บอท
     print("🚀 Bot Started...")
-    bot.infinity_polling(allowed_updates=['message', 'chat_member', 'my_chat_member'])
+    # allowed_updates เพื่อให้มั่นใจว่ารับ event เข้าออกได้ชัวร์
+    bot.infinity_polling(allowed_updates=['chat_member', 'message', 'my_chat_member'])
