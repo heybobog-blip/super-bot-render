@@ -145,7 +145,7 @@ def on_member_change(update):
 
 # ... (ส่วนอื่นเหมือนเดิม) ...
 
-# --- 8. Loop เช็ควันหมดอายุ + แจ้งเตือน + Auto Upgrade ---
+# --- 8. Loop เช็ควันหมดอายุ + แจ้งเตือน (เวอร์ชัน: แท็กชื่อลูกค้าชัดเจน ไม่ให้คนอื่นตกใจ) ---
 def check_expiry_loop():
     print("⏳ Auto-Kick & Notify Loop Started...")
     while True:
@@ -153,19 +153,17 @@ def check_expiry_loop():
             global sheet
             if sheet is None: sheet, _ = get_sheets()
             if sheet:
-                # ดึงข้อมูลทั้งหมด
                 records = sheet.get_all_records()
                 now = get_thai_time().replace(tzinfo=None)
                 
                 for i, record in enumerate(records, start=2):
-                    # ข้ามคนที่เป็น Permanent หรือไม่มีวันหมดอายุ
                     if record['Status'] != 'Active' or record['Expiry Date'] in ["-", ""]:
                         continue
 
                     try:
                         exp_date = datetime.datetime.strptime(record['Expiry Date'], "%Y-%m-%d %H:%M:%S")
                         uid = str(record['User ID'])
-                        name = record['Name']
+                        name = record['Name'] # ดึงชื่อลูกค้ามาจาก Sheet
                         remaining_time = exp_date - now
                         
                         # --- ส่วนที่ 1: แจ้งเตือนก่อน 2 วัน ---
@@ -174,34 +172,40 @@ def check_expiry_loop():
                         if datetime.timedelta(days=0) < remaining_time <= datetime.timedelta(days=2):
                             if is_notified != 'Yes':
                                 try:
-                                    msg_warn = (
-                                        f"⚠️ <b>แจ้งเตือนใกล้หมดอายุ</b>\n"
-                                        f"คุณ {name} เหลือเวลาใช้งานอีก {remaining_time.days} วัน {int(remaining_time.seconds/3600)} ชม.\n"
-                                        f"📅 หมดอายุ: {record['Expiry Date']}\n"
-                                        f"<i>โปรดต่ออายุก่อนกำหนด เพื่อการใช้งานที่ต่อเนื่อง</i>"
+                                    # ✅ ใช้ชื่อลูกค้า (name) เป็นตัวแท็ก -> คนอื่นเห็นชื่อคนอื่นจะได้ไม่ตกใจ
+                                    # ✅ ยังคงเป็น Link สีฟ้า กดแล้ววาร์ปไปหาเจ้าตัวได้
+                                    mention_link = f"<a href='tg://user?id={uid}'>คุณ {name}</a>"
+                                    
+                                    msg_group = (
+                                        f"📢 <b>แจ้งเตือนใกล้หมดอายุ</b>\n"
+                                        f"ถึง {mention_link}\n" # ผลลัพธ์: ถึง คุณสมชาย (เป็นลิ้งค์)
+                                        f"สถานะสมาชิกของคุณเหลือเวลาอีก {remaining_time.days} วัน {int(remaining_time.seconds/3600)} ชม.\n"
+                                        f"📅 หมดอายุวันที่: {record['Expiry Date']}\n"
+                                        f"<i>กรุณาติดต่อแอดมินเพื่อต่ออายุก่อนระบบจะดำเนินการอัตโนมัติครับ</i>"
                                     )
-                                    bot.send_message(uid, msg_warn, parse_mode='HTML')
-                                    print(f"🔔 Notified: {name}")
-                                    sheet.update_cell(i, 6, 'Yes') # ติ๊กถูกว่าแจ้งแล้ว (Column F)
+                                    
+                                    bot.send_message(GROUP_ID_MONTHLY, msg_group, parse_mode='HTML')
+                                    print(f"📢 Group Notify Sent: {name}")
+                                    
+                                    sheet.update_cell(i, 6, 'Yes') 
+                                    
                                 except Exception as e:
-                                    print(f"⚠️ Cannot DM {name}: {e}")
+                                    print(f"⚠️ Notify Error {name}: {e}")
 
                         # --- ส่วนที่ 2: เช็คหมดอายุและเตะ ---
                         if now > exp_date:
-                            # เช็ค VVIP (Auto Upgrade) เผื่อเติมเงินเพิ่มระหว่างเดือน
                             if check_is_vvip(uid):
                                 sheet.update_cell(i, 5, 'Permanent')
                                 sheet.update_cell(i, 4, '-')
                                 bot.send_message(GROUP_ID_ADMIN, f"👑 อัปเกรดอัตโนมัติ: คุณ {name} เป็นถาวร")
                                 continue
                             
-                            # ถ้าไม่เจอยอด -> เตะ
                             print(f"🚫 Kicking: {name}")
                             try:
                                 bot.ban_chat_member(GROUP_ID_MONTHLY, uid)
-                                bot.unban_chat_member(GROUP_ID_MONTHLY, uid) # ปลดแบนทันทีเพื่อให้เข้าใหม่ได้
+                                bot.unban_chat_member(GROUP_ID_MONTHLY, uid)
                                 
-                                sheet.update_cell(i, 5, 'Expired') # เปลี่ยนสถานะเป็น Expired
+                                sheet.update_cell(i, 5, 'Expired')
                                 bot.send_message(GROUP_ID_ADMIN, f"🧹 เตะแล้ว: {name} (หมดอายุ)")
                             except Exception as e:
                                 print(f"❌ Kick Error {name}: {e}")
@@ -210,7 +214,7 @@ def check_expiry_loop():
                         print(f"Row {i} Error: {inner_e}")
                         continue
 
-            time.sleep(60) # เช็คทุก 1 นาที
+            time.sleep(60)
         except Exception as e:
             print(f"Loop Error: {e}")
             time.sleep(60)
