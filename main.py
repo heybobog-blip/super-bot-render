@@ -73,7 +73,6 @@ def find_user_row_index(user_id):
     global sheet
     if sheet is None: sheet, _ = get_sheets()
     try:
-        # ดึงข้อมูลคอลัมน์ A (User ID) ทั้งหมดมาหา
         cell = sheet.find(str(user_id))
         return cell.row
     except:
@@ -96,9 +95,7 @@ def check_is_vvip(user_id):
         return False
     except: return False
 
-# ... (ส่วนอื่นเหมือนเดิม) ...
-
-# --- 7. Event: คนเข้ากลุ่ม (Smart Update Logic - Optimized) ---
+# --- 7. Event: คนเข้ากลุ่ม (Smart Update + Auto Delete Old Warning) ---
 @bot.chat_member_handler()
 def on_member_change(update):
     if str(update.chat.id) == GROUP_ID_MONTHLY:
@@ -127,25 +124,36 @@ def on_member_change(update):
                         existing_row = find_user_row_index(user.id)
                         
                         if existing_row:
-                            # [CASE UPDATE] อัปเดตทีเดียวทั้งช่วง (Batch Update) ประหยัด Quota
+                            # [CASE UPDATE] อัปเดตสมาชิกเดิม
                             print(f"🔄 Updating existing user at row {existing_row}")
-                            # อัปเดต Col C ถึง F (3-6)
-                            sheet.update(f'C{existing_row}:F{existing_row}', [[format_date(now_thai), expiry_str, status_str, ""]])
+                            
+                            # 1. พยายามลบข้อความแจ้งเตือนเก่า (ถ้ามี)
+                            try:
+                                # อ่านค่า Msg ID จาก Col 7 (ระวัง: ถ้าแถวใหม่ยังไม่มี Col 7 อาจ error ได้จึงต้อง try)
+                                val_msg_id = sheet.cell(existing_row, 7).value 
+                                if val_msg_id:
+                                    bot.delete_message(GROUP_ID_MONTHLY, int(val_msg_id))
+                                    print(f"🗑️ Deleted old warning for {user.first_name}")
+                            except Exception as del_e:
+                                print(f"⚠️ Could not delete old msg: {del_e}")
+
+                            # 2. อัปเดตข้อมูลใหม่ (รวบยอด 1 API Call)
+                            # Update C(3) to G(7) -> [JoinDate, Expiry, Status, Notified, MsgID]
+                            # ตั้งค่า Notified และ MsgID เป็นค่าว่าง ""
+                            sheet.update(f'C{existing_row}:G{existing_row}', [[format_date(now_thai), expiry_str, status_str, "", ""]])
                             
                             bot.send_message(GROUP_ID_ADMIN, f"{msg}\n(อัปเดตข้อมูลเดิม แถวที่ {existing_row})")
                         else:
-                            # [CASE NEW]
+                            # [CASE NEW] สมาชิกใหม่
                             print(f"➕ Adding new user")
-                            sheet.append_row([str(user.id), user.first_name, format_date(now_thai), expiry_str, status_str, ""])
+                            sheet.append_row([str(user.id), user.first_name, format_date(now_thai), expiry_str, status_str, "", ""])
                             bot.send_message(GROUP_ID_ADMIN, f"{msg}\n(ลงข้อมูลใหม่)")
                             
                     except Exception as e:
                         print(f"Save Error: {e}")
                         bot.send_message(GROUP_ID_ADMIN, f"❌ Error บันทึกข้อมูล: {e}")
 
-# ... (ส่วนอื่นเหมือนเดิม) ...
-
-# --- 8. Loop เช็ควันหมดอายุ + แจ้งเตือน (เวอร์ชัน: แท็กชื่อลูกค้าชัดเจน ไม่ให้คนอื่นตกใจ) ---
+# --- 8. Loop เช็ควันหมดอายุ + แจ้งเตือน + ลบข้อความ (Optimized Rate Limit) ---
 def check_expiry_loop():
     print("⏳ Auto-Kick & Notify Loop Started...")
     while True:
@@ -153,6 +161,7 @@ def check_expiry_loop():
             global sheet
             if sheet is None: sheet, _ = get_sheets()
             if sheet:
+                # ดึงข้อมูลทั้งหมด
                 records = sheet.get_all_records()
                 now = get_thai_time().replace(tzinfo=None)
                 
@@ -163,8 +172,11 @@ def check_expiry_loop():
                     try:
                         exp_date = datetime.datetime.strptime(record['Expiry Date'], "%Y-%m-%d %H:%M:%S")
                         uid = str(record['User ID'])
-                        name = record['Name'] # ดึงชื่อลูกค้ามาจาก Sheet
+                        name = record['Name']
                         remaining_time = exp_date - now
+                        
+                        # อ่าน Message ID เก่า (ใช้ .get เพื่อป้องกัน Error กรณีลืมใส่หัวตาราง)
+                        msg_id_str = str(record.get('Message ID', '')).strip()
                         
                         # --- ส่วนที่ 1: แจ้งเตือนก่อน 2 วัน ---
                         is_notified = str(record.get('Notified', '')).strip()
@@ -172,22 +184,26 @@ def check_expiry_loop():
                         if datetime.timedelta(days=0) < remaining_time <= datetime.timedelta(days=2):
                             if is_notified != 'Yes':
                                 try:
-                                    # ✅ ใช้ชื่อลูกค้า (name) เป็นตัวแท็ก -> คนอื่นเห็นชื่อคนอื่นจะได้ไม่ตกใจ
-                                    # ✅ ยังคงเป็น Link สีฟ้า กดแล้ววาร์ปไปหาเจ้าตัวได้
                                     mention_link = f"<a href='tg://user?id={uid}'>คุณ {name}</a>"
                                     
                                     msg_group = (
                                         f"📢 <b>แจ้งเตือนใกล้หมดอายุ</b>\n"
-                                        f"ถึง {mention_link}\n" # ผลลัพธ์: ถึง คุณสมชาย (เป็นลิ้งค์)
+                                        f"ถึง {mention_link}\n"
                                         f"สถานะสมาชิกของคุณเหลือเวลาอีก {remaining_time.days} วัน {int(remaining_time.seconds/3600)} ชม.\n"
                                         f"📅 หมดอายุวันที่: {record['Expiry Date']}\n"
                                         f"<i>กรุณาติดต่อแอดมินเพื่อต่ออายุก่อนระบบจะดำเนินการอัตโนมัติครับ</i>"
                                     )
                                     
-                                    bot.send_message(GROUP_ID_MONTHLY, msg_group, parse_mode='HTML')
+                                    # ส่งข้อความ
+                                    sent_msg = bot.send_message(GROUP_ID_MONTHLY, msg_group, parse_mode='HTML')
                                     print(f"📢 Group Notify Sent: {name}")
                                     
-                                    sheet.update_cell(i, 6, 'Yes') 
+                                    # [OPTIMIZATION] อัปเดต Col F และ G พร้อมกัน (1 API Call)
+                                    # F=Notified, G=Message ID
+                                    sheet.update(f'F{i}:G{i}', [['Yes', str(sent_msg.message_id)]])
+                                    
+                                    # [IMPORTANT] พัก 1.5 วินาที กัน Google Block
+                                    time.sleep(1.5)
                                     
                                 except Exception as e:
                                     print(f"⚠️ Notify Error {name}: {e}")
@@ -198,15 +214,33 @@ def check_expiry_loop():
                                 sheet.update_cell(i, 5, 'Permanent')
                                 sheet.update_cell(i, 4, '-')
                                 bot.send_message(GROUP_ID_ADMIN, f"👑 อัปเกรดอัตโนมัติ: คุณ {name} เป็นถาวร")
+                                time.sleep(1.5)
                                 continue
                             
                             print(f"🚫 Kicking: {name}")
                             try:
+                                # 1. ลบข้อความแจ้งเตือนเก่าทิ้ง
+                                if msg_id_str:
+                                    try:
+                                        bot.delete_message(GROUP_ID_MONTHLY, int(msg_id_str))
+                                        print(f"🗑️ Auto-delete warning msg for {name}")
+                                    except Exception as del_e:
+                                        print(f"⚠️ Delete msg failed: {del_e}")
+
+                                # 2. เตะออกจากกลุ่ม
                                 bot.ban_chat_member(GROUP_ID_MONTHLY, uid)
                                 bot.unban_chat_member(GROUP_ID_MONTHLY, uid)
                                 
+                                # 3. อัปเดตชีท (เปลี่ยน Status และล้าง Msg ID)
+                                # ใช้ update_cell แยกกันแต่มี sleep คั่น ปลอดภัยกว่า
                                 sheet.update_cell(i, 5, 'Expired')
-                                bot.send_message(GROUP_ID_ADMIN, f"🧹 เตะแล้ว: {name} (หมดอายุ)")
+                                sheet.update_cell(i, 7, "") 
+                                
+                                bot.send_message(GROUP_ID_ADMIN, f"🧹 เตะแล้ว: {name} (หมดอายุ) และลบแจ้งเตือนแล้ว")
+                                
+                                # [IMPORTANT] พัก 1.5 วินาที กัน Google Block
+                                time.sleep(1.5)
+                                
                             except Exception as e:
                                 print(f"❌ Kick Error {name}: {e}")
 
