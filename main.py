@@ -96,11 +96,12 @@ def check_is_vvip(user_id):
         return False
     except: return False
 
-# --- 7. Event: คนเข้ากลุ่ม (Smart Update Logic) ---
+# ... (ส่วนอื่นเหมือนเดิม) ...
+
+# --- 7. Event: คนเข้ากลุ่ม (Smart Update Logic - Optimized) ---
 @bot.chat_member_handler()
 def on_member_change(update):
     if str(update.chat.id) == GROUP_ID_MONTHLY:
-        # เช็คว่าเป็นสมาชิกใหม่ หรือ สมาชิกเก่าที่วนกลับมา
         if update.new_chat_member.status in ['member', 'administrator', 'creator']:
             if update.old_chat_member.status not in ['member', 'administrator', 'creator']:
                 
@@ -110,45 +111,39 @@ def on_member_change(update):
                 now_thai = get_thai_time()
                 is_permanent = check_is_vvip(user.id)
                 
-                # กำหนดสถานะและวันหมดอายุ
                 if is_permanent:
                     expiry_str, status_str = "-", "Permanent"
                     msg = f"✅ ลูกค้า VVIP เข้ากลุ่ม: {user.first_name}\nสถานะ: ถาวร (เช็คจากยอด 999+)"
                 else:
-                    # นับไปอีก 30 วันจากวันนี้
                     expiry = now_thai + datetime.timedelta(days=30)
                     expiry_str, status_str = format_date(expiry), "Active"
                     msg = f"✅ ลูกค้ารายเดือนเข้ากลุ่ม: {user.first_name}\nหมดอายุ: {expiry_str}"
 
-                # --- ส่วนสำคัญ: บันทึกลง Sheet (แก้ปัญหาข้อมูลซ้ำ) ---
                 global sheet
                 if sheet is None: sheet, _ = get_sheets()
                 
                 if sheet:
                     try:
-                        # 1. ค้นหาว่ามี User นี้อยู่แล้วไหม?
                         existing_row = find_user_row_index(user.id)
                         
                         if existing_row:
-                            # [CASE UPDATE] ถ้ามีอยู่แล้ว -> อัปเดตแถวเดิม
+                            # [CASE UPDATE] อัปเดตทีเดียวทั้งช่วง (Batch Update) ประหยัด Quota
                             print(f"🔄 Updating existing user at row {existing_row}")
-                            # Column 3=JoinDate, 4=Expiry, 5=Status, 6=Notified
-                            sheet.update_cell(existing_row, 3, format_date(now_thai)) # อัปเดตวันที่เข้าล่าสุด
-                            sheet.update_cell(existing_row, 4, expiry_str) # อัปเดตวันหมดอายุใหม่
-                            sheet.update_cell(existing_row, 5, status_str) # รีเซ็ตสถานะเป็น Active
-                            sheet.update_cell(existing_row, 6, "")         # ล้างสถานะแจ้งเตือน (Notified)
+                            # อัปเดต Col C ถึง F (3-6)
+                            sheet.update(f'C{existing_row}:F{existing_row}', [[format_date(now_thai), expiry_str, status_str, ""]])
                             
                             bot.send_message(GROUP_ID_ADMIN, f"{msg}\n(อัปเดตข้อมูลเดิม แถวที่ {existing_row})")
                         else:
-                            # [CASE NEW] ถ้าไม่มี -> เพิ่มแถวใหม่
+                            # [CASE NEW]
                             print(f"➕ Adding new user")
-                            # เพิ่ม User ID, Name, Join Date, Expiry, Status, Notified(ว่าง)
                             sheet.append_row([str(user.id), user.first_name, format_date(now_thai), expiry_str, status_str, ""])
                             bot.send_message(GROUP_ID_ADMIN, f"{msg}\n(ลงข้อมูลใหม่)")
                             
                     except Exception as e:
                         print(f"Save Error: {e}")
                         bot.send_message(GROUP_ID_ADMIN, f"❌ Error บันทึกข้อมูล: {e}")
+
+# ... (ส่วนอื่นเหมือนเดิม) ...
 
 # --- 8. Loop เช็ควันหมดอายุ + แจ้งเตือน + Auto Upgrade ---
 def check_expiry_loop():
