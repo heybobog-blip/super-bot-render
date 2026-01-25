@@ -29,9 +29,9 @@ GROUP_ID_ADMIN = str(os.environ.get('GROUP_ID_ADMIN'))
 SHEET_NAME = os.environ.get('SHEET_NAME', 'Members') 
 PAYMENT_SHEET_NAME = "VVIP_Data"
 
-# 🔴 ชื่อไฟล์/Sheet ใหม่ (เพิ่มเข้ามา)
-SHEET_JARERN_NAME = os.environ.get('SHEET_JARERN') # ชื่อไฟล์ Google Sheet อันใหม่
-TRANSACTION_SHEET_NAME = "Transactions" # ชื่อแท็บตามรูป
+# 🔴 ชื่อไฟล์/Sheet ใหม่
+SHEET_JARERN_NAME = os.environ.get('SHEET_JARERN') 
+TRANSACTION_SHEET_NAME = "Transactions" 
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
@@ -43,7 +43,7 @@ def get_thai_time():
 def format_date(date_obj):
     return date_obj.strftime("%Y-%m-%d %H:%M:%S")
 
-# --- 4. เชื่อมต่อ Google Sheets (แก้ให้ต่อ 2 ไฟล์) ---
+# --- 4. เชื่อมต่อ Google Sheets ---
 def get_sheets():
     try:
         cred_json = os.environ.get('GOOGLE_KEY_JSON')
@@ -55,12 +55,12 @@ def get_sheets():
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         client = gspread.authorize(creds)
         
-        # 1. ไฟล์หลัก (Members & VVIP_Data)
+        # 1. ไฟล์หลัก
         s_main = client.open(SHEET_NAME).worksheet('Members')
-        try: s_pay = client.open(PAYMENT_SHEET_NAME).sheet1 # หรือเปิดจากไฟล์เดียวกัน
+        try: s_pay = client.open(PAYMENT_SHEET_NAME).sheet1
         except: s_pay = None
         
-        # 2. 🔴 ไฟล์ใหม่ (Transactions)
+        # 2. ไฟล์ใหม่
         s_trans = None
         if SHEET_JARERN_NAME:
             try:
@@ -87,7 +87,7 @@ def find_user_row_index(user_id):
     except:
         return None
 
-# --- 6. ดึงยอดเงินล่าสุด (เช็ค 2 ชีท: VVIP_Data และ Transactions) ---
+# --- 6. ดึงยอดเงินล่าสุด (แก้ User__ID ตรงนี้) ---
 def get_user_payment_amount(user_id):
     global sheet_payment, sheet_transactions
     if sheet_payment is None or sheet_transactions is None: 
@@ -95,9 +95,7 @@ def get_user_payment_amount(user_id):
     
     max_amount = 0
     
-    # -------------------------------------------------------
     # 1. เช็คจากชีทเก่า (VVIP_Data)
-    # -------------------------------------------------------
     if sheet_payment:
         try:
             records = sheet_payment.get_all_records()
@@ -105,7 +103,6 @@ def get_user_payment_amount(user_id):
                 r_uid = str(record.get('User ID', '')).strip()
                 r_amount = record.get('Amount', 0)
                 status = record.get('Status', '')
-                # ชีทเก่าใช้คำว่า 'สำเร็จ'
                 if r_uid == str(user_id) and status == 'สำเร็จ':
                     try:
                         val = float(str(r_amount).replace(',', ''))
@@ -113,19 +110,19 @@ def get_user_payment_amount(user_id):
                     except: continue
         except Exception as e: print(f"Check VVIP_Data Error: {e}")
 
-    # -------------------------------------------------------
-    # 2. 🔴 เช็คจากชีทใหม่ (Transactions)
-    # -------------------------------------------------------
+    # 2. 🔴 เช็คจากชีทใหม่ (Transactions) - แก้โค้ดให้รับ User__ID
     if sheet_transactions:
         try:
             records = sheet_transactions.get_all_records()
             for record in records:
-                # ดูชื่อ Column จากรูปที่ส่งมา: User_ID (มี underscore), Amount, Status
-                r_uid = str(record.get('User_ID', '')).strip() 
+                # 🛠️ แก้ตรงนี้: เปลี่ยน User_ID เป็น User__ID (ขีดล่าง 2 อัน)
+                # หรือถ้ามันหาไม่เจอจริงๆ ให้ลองหาทั้ง 2 แบบเพื่อความชัวร์
+                raw_uid = record.get('User__ID') or record.get('User_ID') or ''
+                r_uid = str(raw_uid).strip()
+
                 r_amount = record.get('Amount', 0)
-                status = str(record.get('Status', '')).strip() # ในรูปเป็น 'Approved'
+                status = str(record.get('Status', '')).strip()
                 
-                # ชีทใหม่ใช้คำว่า 'Approved'
                 if r_uid == str(user_id) and status == 'Approved':
                     try:
                         val = float(str(r_amount).replace(',', ''))
@@ -146,10 +143,8 @@ def on_member_change(update):
                 if user.is_bot: return
 
                 now_thai = get_thai_time()
-                # 🔴 ดึงยอดเงิน (ระบบจะวิ่งไปหาทั้ง 2 ชีทให้อัตโนมัติ)
                 amount = get_user_payment_amount(user.id)
                 
-                # Logic: 2499=ถาวร / 1299=90วัน / อื่นๆ=30วัน
                 if amount >= 2499:
                     expiry_str, status_str = "-", "Permanent"
                     msg = f"✅ ลูกค้า 2499 เข้ากลุ่ม: {user.first_name}\nสถานะ: ถาวร (VIP)"
@@ -169,7 +164,6 @@ def on_member_change(update):
                     try:
                         existing_row = find_user_row_index(user.id)
                         if existing_row:
-                            # 🛡️ [PROTECTION] เช็คสถานะเดิมก่อน (กันลูกค้าเก่าถาวรหลุด)
                             try:
                                 old_status = sheet.cell(existing_row, 5).value 
                                 if old_status == 'Permanent':
@@ -228,7 +222,6 @@ def check_expiry_loop():
 
                         # 2. หมดเวลา
                         if now > exp_date:
-                            # 🔴 เช็คยอดล่าสุดจากทั้ง 2 ชีท ก่อนเตะ
                             amount = get_user_payment_amount(uid)
                             if amount >= 2499:
                                 sheet.update_cell(i, 5, 'Permanent')
