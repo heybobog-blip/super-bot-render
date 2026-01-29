@@ -130,132 +130,166 @@ def find_active_row_data(user_id):
     except: pass
     return None
 
-# --- 8. Event คนเข้า ---
+# --- 8. Event คนเข้า (โหมด Debug: ฟ้องทุกอย่าง) ---
 @bot.chat_member_handler()
 def on_member_change(update):
-    if str(update.chat.id) != GROUP_ID_MONTHLY: return
+    # 1. ปริ้น ID ของกลุ่มที่เกิดเรื่องออกมาดูเลย
+    incoming_group_id = str(update.chat.id)
+    target_group_id = str(GROUP_ID_MONTHLY).strip()
+    
+    print(f"--------------------------------------------------")
+    print(f"📡 EVENT DETECTED!")
+    print(f"   - Event Type: chat_member")
+    print(f"   - Group ID (Incoming): {incoming_group_id}")
+    print(f"   - Group ID (Target):   {target_group_id}")
+    
+    # 2. เช็คว่า ID ตรงกันไหม
+    if incoming_group_id != target_group_id: 
+        print(f"❌ MISMATCH: เลขกลุ่มไม่ตรงกัน! บอทจึงไม่ทำงาน")
+        print(f"   --> ให้เอาเลข {incoming_group_id} ไปแก้ใน Environment Variable")
+        return
 
-    # เช็คเฉพาะคนเข้าใหม่
-    if update.new_chat_member.status in ['member', 'administrator', 'creator'] and \
-       update.old_chat_member.status not in ['member', 'administrator', 'creator']:
-        
-        user = update.new_chat_member.user
-        if user.is_bot: return
-        
-        print(f"👤 User Joined: {user.first_name} ({user.id})")
-        
-        now_thai = get_thai_time()
-        final_amount = 0
-        is_legacy_migration = False
-        legacy_info = {}
-        
-        renewal_row = None
-        is_renewal = False
+    # 3. ดูสถานะคนเข้า
+    new_status = update.new_chat_member.status
+    old_status = update.old_chat_member.status
+    user = update.new_chat_member.user
+    
+    print(f"👤 User: {user.first_name} (ID: {user.id})")
+    print(f"   - Status Change: {old_status} -> {new_status}")
 
-        # STEP 1: เช็คสถานะใน Members2
-        existing_data = find_active_row_data(user.id)
-        if existing_data:
-            # 🛡️ แปลงเป็นตัวเล็กเพื่อป้องกันการพิมพ์ผิด (Active/active)
-            current_status = str(existing_data['status']).strip().lower()
-            if current_status in ['permanent', 'active']:
-                print(f"✅ User {user.first_name} is Active/Permanent. Skip.")
-                return
-            else:
-                print(f"🔄 User {user.first_name} is Expired. Checking for Renewal...")
-                renewal_row = existing_data['row']
-                is_renewal = True
+    # เช็คเงื่อนไขคนเข้าใหม่
+    is_joining = new_status in ['member', 'administrator', 'creator']
+    was_outsider = old_status not in ['member', 'administrator', 'creator']
 
-        # STEP 2: เช็คยอดเงินใหม่
-        payment_amount = check_new_payment(user.id)
+    if not (is_joining and was_outsider):
+        print(f"⚠️ SKIPPING: ไม่ใช่การเข้ากลุ่มใหม่ (อาจเป็นการแก้สิทธิ์ หรือ Re-join แบบ cache)")
+        return
         
-        if payment_amount > 0:
-            final_amount = payment_amount
-            print(f"💰 Found New Payment: {final_amount}")
-        else:
-            # STEP 3: เช็คสิทธิ์เก่า (ถ้าไม่ใช่การต่ออายุ)
-            if not is_renewal:
-                legacy_data = check_legacy_data(user.id)
-                if legacy_data['found']:
-                    status = legacy_data['status']
-                    expiry_str = legacy_data['expiry_date']
-                    is_valid_legacy = False
-                    
-                    if status == 'Permanent':
-                        is_valid_legacy = True
-                        final_amount = 2500
-                    elif status == 'Active':
-                        try:
-                            exp_date = datetime.datetime.strptime(expiry_str, "%Y-%m-%d %H:%M:%S")
-                            exp_date = exp_date.replace(tzinfo=None)
-                            now_no_tz = now_thai.replace(tzinfo=None)
-                            if exp_date > now_no_tz:
-                                is_valid_legacy = True
-                                final_amount = 100
-                        except: pass
-                    
-                    if is_valid_legacy:
-                        is_legacy_migration = True
-                        legacy_info = legacy_data
-                        print(f"♻️ Valid Legacy User Found: {status}")
+    if user.is_bot: 
+        print("🤖 User is a bot. Skip.")
+        return
+        
+    print(f"✅ PASS: เงื่อนไขถูกต้อง เริ่มกระบวนการตรวจสอบ...")
+    
+    # --- เริ่ม Logic เดิม ---
+    now_thai = get_thai_time()
+    final_amount = 0
+    is_legacy_migration = False
+    legacy_info = {}
+    
+    renewal_row = None
+    is_renewal = False
 
-        # STEP 4: ตัดสินใจ
-        if final_amount == 0 and not is_legacy_migration:
-            print(f"🚫 Kicking {user.first_name}")
-            try:
-                bot.send_message(user.id, "❌ ไม่พบยอดเงิน หรือ สิทธิ์เดิมหมดอายุแล้ว\nกรุณาแจ้งสลิปใหม่")
-                bot.ban_chat_member(GROUP_ID_MONTHLY, user.id)
-                bot.unban_chat_member(GROUP_ID_MONTHLY, user.id)
-            except: pass
+    # STEP 1: เช็คสถานะใน Members2
+    existing_data = find_active_row_data(user.id)
+    if existing_data:
+        current_status = str(existing_data['status']).strip().lower()
+        print(f"   - Found in Members2 with status: {current_status}") # Debug
+        if current_status in ['permanent', 'active']:
+            print(f"✅ User {user.first_name} is Active/Permanent. Skip.")
             return
-
-        save_expiry_str = "-"
-        save_status = "Active"
-        msg_plan = ""
-
-        if is_legacy_migration:
-            save_expiry_str = legacy_info['expiry_date']
-            save_status = legacy_info['status']
-            msg_plan = f"Migrated ({save_status})"
         else:
-            if final_amount >= 2499:
-                save_expiry_str = "-"
-                save_status = "Permanent"
-                msg_plan = "VVIP ถาวร"
-            elif final_amount >= 1299:
-                expiry = now_thai + datetime.timedelta(days=90)
-                save_expiry_str = format_date(expiry)
-                msg_plan = "90 วัน"
+            print(f"🔄 User {user.first_name} is Expired. Checking for Renewal...")
+            renewal_row = existing_data['row']
+            is_renewal = True
+    else:
+        print(f"   - Not found in Members2") # Debug
+
+    # STEP 2: เช็คยอดเงินใหม่
+    payment_amount = check_new_payment(user.id)
+    print(f"   - Payment Check Result: {payment_amount}") # Debug
+    
+    if payment_amount > 0:
+        final_amount = payment_amount
+        print(f"💰 Found New Payment: {final_amount}")
+    else:
+        # STEP 3: เช็คสิทธิ์เก่า
+        if not is_renewal:
+            legacy_data = check_legacy_data(user.id)
+            if legacy_data['found']:
+                status = legacy_data['status']
+                expiry_str = legacy_data['expiry_date']
+                is_valid_legacy = False
+                
+                if status == 'Permanent':
+                    is_valid_legacy = True
+                    final_amount = 2500
+                elif status == 'Active':
+                    try:
+                        exp_date = datetime.datetime.strptime(expiry_str, "%Y-%m-%d %H:%M:%S")
+                        exp_date = exp_date.replace(tzinfo=None)
+                        now_no_tz = now_thai.replace(tzinfo=None)
+                        if exp_date > now_no_tz:
+                            is_valid_legacy = True
+                            final_amount = 100
+                    except: pass
+                
+                if is_valid_legacy:
+                    is_legacy_migration = True
+                    legacy_info = legacy_data
+                    print(f"♻️ Valid Legacy User Found: {status}")
             else:
-                expiry = now_thai + datetime.timedelta(days=30)
-                save_expiry_str = format_date(expiry)
-                msg_plan = "30 วัน"
+                print(f"   - Legacy Data Not Found") # Debug
 
-        # บันทึก
-        global sheet_active
-        if sheet_active is None: _, sheet_active, _ = get_sheets()
-
+    # STEP 4: ตัดสินใจ
+    if final_amount == 0 and not is_legacy_migration:
+        print(f"🚫 DECISION: KICKING {user.first_name}")
         try:
-            if is_renewal and renewal_row:
-                # อัปเดตคนเดิม (Renewal)
-                sheet_active.update(f'D{renewal_row}:G{renewal_row}', [[save_expiry_str, save_status, "", ""]])
-                bot.send_message(GROUP_ID_ADMIN, f"✅ ต่ออายุสมาชิก: {user.first_name}\nPlan: {msg_plan}")
-                print(f"Updated renewal for {user.first_name}")
-            else:
-                # คนใหม่ / ย้ายบ้าน (Append)
-                join_date_save = legacy_info['join_date'] if is_legacy_migration else format_date(now_thai)
-                sheet_active.append_row([
-                    str(user.id),
-                    user.first_name,
-                    join_date_save,
-                    save_expiry_str,
-                    save_status,
-                    "", ""
-                ])
-                bot.send_message(GROUP_ID_ADMIN, f"✅ สมาชิกใหม่/ย้ายบ้าน: {user.first_name}\nPlan: {msg_plan}")
-                print(f"Appended new user {user.first_name}")
-            
-        except Exception as e:
-            print(f"❌ Save Error: {e}")
+            bot.send_message(user.id, "❌ ไม่พบยอดเงิน หรือ สิทธิ์เดิมหมดอายุแล้ว\nกรุณาแจ้งสลิปใหม่")
+            bot.ban_chat_member(GROUP_ID_MONTHLY, user.id)
+            bot.unban_chat_member(GROUP_ID_MONTHLY, user.id)
+            print(f"   - Kick Command Sent")
+        except Exception as e: 
+            print(f"   - Kick Failed: {e}")
+        return
+
+    # คำนวณวันหมดอายุ
+    save_expiry_str = "-"
+    save_status = "Active"
+    msg_plan = ""
+
+    if is_legacy_migration:
+        save_expiry_str = legacy_info['expiry_date']
+        save_status = legacy_info['status']
+        msg_plan = f"Migrated ({save_status})"
+    else:
+        if final_amount >= 2499:
+            save_expiry_str = "-"
+            save_status = "Permanent"
+            msg_plan = "VVIP ถาวร"
+        elif final_amount >= 1299:
+            expiry = now_thai + datetime.timedelta(days=90)
+            save_expiry_str = format_date(expiry)
+            msg_plan = "90 วัน"
+        else:
+            expiry = now_thai + datetime.timedelta(days=30)
+            save_expiry_str = format_date(expiry)
+            msg_plan = "30 วัน"
+
+    # บันทึก
+    global sheet_active
+    if sheet_active is None: _, sheet_active, _ = get_sheets()
+
+    try:
+        if is_renewal and renewal_row:
+            sheet_active.update(f'D{renewal_row}:G{renewal_row}', [[save_expiry_str, save_status, "", ""]])
+            bot.send_message(GROUP_ID_ADMIN, f"✅ ต่ออายุสมาชิก: {user.first_name}\nPlan: {msg_plan}")
+            print(f"Updated renewal for {user.first_name}")
+        else:
+            join_date_save = legacy_info['join_date'] if is_legacy_migration else format_date(now_thai)
+            sheet_active.append_row([
+                str(user.id),
+                user.first_name,
+                join_date_save,
+                save_expiry_str,
+                save_status,
+                "", ""
+            ])
+            bot.send_message(GROUP_ID_ADMIN, f"✅ สมาชิกใหม่/ย้ายบ้าน: {user.first_name}\nPlan: {msg_plan}")
+            print(f"Appended new user {user.first_name}")
+        
+    except Exception as e:
+        print(f"❌ Save Error: {e}")
 
 # --- 9. Loop เช็ควันหมดอายุ ---
 def check_expiry_loop():
