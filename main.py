@@ -7,6 +7,7 @@ import time
 import threading
 import os
 import json
+import html
 from flask import Flask
 
 # --- 1. Server กันหลับ ---
@@ -14,7 +15,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Bot is running OK!"
+    return "Bot is running OK (Final Production)!"
 
 def run_web_server():
     port = int(os.environ.get("PORT", 5000))
@@ -25,13 +26,9 @@ BOT_TOKEN = os.environ.get('BOT_TOKEN')
 GROUP_ID_MONTHLY = str(os.environ.get('GROUP_ID_MONTHLY'))
 GROUP_ID_ADMIN = str(os.environ.get('GROUP_ID_ADMIN'))
 
-# ชื่อไฟล์/Sheet เก่า
-SHEET_NAME = os.environ.get('SHEET_NAME', 'Members') 
-PAYMENT_SHEET_NAME = "VVIP_Data"
-
-# 🔴 ชื่อไฟล์/Sheet ใหม่
-SHEET_JARERN_NAME = os.environ.get('SHEET_JARERN') 
-TRANSACTION_SHEET_NAME = "Transactions" 
+# ชื่อไฟล์
+SHEET_MEMBERS_FILE = os.environ.get('SHEET_NAME', 'Members') 
+SHEET_PAYMENT_FILE = os.environ.get('SHEET_JARERN', 'JaroenPorn_DB')
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
@@ -55,196 +52,278 @@ def get_sheets():
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         client = gspread.authorize(creds)
         
-        # 1. ไฟล์หลัก
-        s_main = client.open(SHEET_NAME).worksheet('Members')
-        try: s_pay = client.open(PAYMENT_SHEET_NAME).sheet1
-        except: s_pay = None
-        
-        # 2. ไฟล์ใหม่
-        s_trans = None
-        if SHEET_JARERN_NAME:
-            try:
-                s_trans = client.open(SHEET_JARERN_NAME).worksheet(TRANSACTION_SHEET_NAME)
-                print("✅ Connected to Transactions Sheet")
-            except Exception as e:
-                print(f"⚠️ Cannot connect to Transactions sheet: {e}")
+        # 1. ไฟล์สมาชิก (Members)
+        sh_mem = client.open(SHEET_MEMBERS_FILE)
+        ws_legacy = sh_mem.worksheet('Members')   # หน้าเก่า
+        ws_active = sh_mem.worksheet('Members2')  # หน้าใหม่
 
-        print("✅ Google Sheet Main Connected!")
-        return s_main, s_pay, s_trans
+        # 2. ไฟล์จ่ายเงิน (JaroenPorn_DB)
+        ws_pay = None
+        try:
+            ws_pay = client.open(SHEET_PAYMENT_FILE).sheet1
+            print("✅ Connected to Payment Sheet")
+        except Exception as e:
+            print(f"⚠️ Cannot connect to Payment sheet: {e}")
+
+        print("✅ Google Sheets Connected")
+        return ws_legacy, ws_active, ws_pay
     except Exception as e:
         print(f"❌ Connect Error: {e}")
         return None, None, None
 
-sheet, sheet_payment, sheet_transactions = get_sheets()
+# โหลด Sheet ครั้งแรก
+sheet_legacy, sheet_active, sheet_payment = get_sheets()
 
-# --- 5. หาแถว ---
-def find_user_row_index(user_id):
-    global sheet
-    if sheet is None: sheet, _, _ = get_sheets()
-    try:
-        cell = sheet.find(str(user_id))
-        return cell.row
-    except:
-        return None
-
-# --- 6. ดึงยอดเงินล่าสุด (แก้ User__ID ตรงนี้) ---
-def get_user_payment_amount(user_id):
-    global sheet_payment, sheet_transactions
-    if sheet_payment is None or sheet_transactions is None: 
-        _, sheet_payment, sheet_transactions = get_sheets()
+# --- 5. ฟังก์ชันเช็คยอดเงิน ---
+def check_new_payment(user_id):
+    global sheet_legacy, sheet_active, sheet_payment
+    if sheet_payment is None: _, _, sheet_payment = get_sheets()
     
     max_amount = 0
-    
-    # 1. เช็คจากชีทเก่า (VVIP_Data)
-    if sheet_payment:
-        try:
-            records = sheet_payment.get_all_records()
-            for record in records:
-                r_uid = str(record.get('User ID', '')).strip()
-                r_amount = record.get('Amount', 0)
-                status = record.get('Status', '')
-                if r_uid == str(user_id) and status == 'สำเร็จ':
-                    try:
-                        val = float(str(r_amount).replace(',', ''))
-                        if val > max_amount: max_amount = val
-                    except: continue
-        except Exception as e: print(f"Check VVIP_Data Error: {e}")
-
-    # 2. 🔴 เช็คจากชีทใหม่ (Transactions) - แก้โค้ดให้รับ User__ID
-    if sheet_transactions:
-        try:
-            records = sheet_transactions.get_all_records()
-            for record in records:
-                # 🛠️ แก้ตรงนี้: เปลี่ยน User_ID เป็น User__ID (ขีดล่าง 2 อัน)
-                # หรือถ้ามันหาไม่เจอจริงๆ ให้ลองหาทั้ง 2 แบบเพื่อความชัวร์
-                raw_uid = record.get('User__ID') or record.get('User_ID') or ''
-                r_uid = str(raw_uid).strip()
-
-                r_amount = record.get('Amount', 0)
-                status = str(record.get('Status', '')).strip()
-                
-                if r_uid == str(user_id) and status == 'Approved':
-                    try:
-                        val = float(str(r_amount).replace(',', ''))
-                        if val > max_amount: max_amount = val
-                    except: continue
-        except Exception as e: print(f"Check Transactions Error: {e}")
-
+    try:
+        records = sheet_payment.get_all_records()
+        for record in records:
+            r_uid = str(record.get('User ID', '')).strip()
+            # 🛡️ ป้องกัน Human Error: แปลงเป็นตัวเล็กก่อนเทียบ (active/Active)
+            status = str(record.get('สถานะ', '')).strip().lower()
+            
+            if r_uid == str(user_id) and status == 'active':
+                try:
+                    # 🛡️ ป้องกัน Error ช่องว่าง: ถ้าไม่มีเลขให้ข้าม
+                    amount_str = str(record.get('ยอดเงิน', 0)).replace(',', '').strip()
+                    if not amount_str: continue 
+                    
+                    val = float(amount_str)
+                    if val > max_amount: max_amount = val
+                except: continue
+    except Exception as e:
+        print(f"Check Payment Error: {e}")
     return max_amount
 
-# --- 7. Event คนเข้า ---
+# --- 6. ฟังก์ชันเช็คข้อมูลเก่า ---
+def check_legacy_data(user_id):
+    global sheet_legacy
+    if sheet_legacy is None: sheet_legacy, _, _ = get_sheets()
+    try:
+        cell = sheet_legacy.find(str(user_id))
+        if cell:
+            row = cell.row
+            data = sheet_legacy.row_values(row)
+            return {
+                'found': True,
+                'join_date': data[2] if len(data) > 2 else '-',
+                'expiry_date': data[3] if len(data) > 3 else '-',
+                'status': data[4] if len(data) > 4 else '-'
+            }
+    except: pass
+    return {'found': False}
+
+# --- 7. ฟังก์ชันหาแถวใน Members2 ---
+def find_active_row_data(user_id):
+    global sheet_active
+    if sheet_active is None: _, sheet_active, _ = get_sheets()
+    try:
+        cell = sheet_active.find(str(user_id))
+        if cell:
+            status = sheet_active.cell(cell.row, 5).value # Column E
+            return {'row': cell.row, 'status': status}
+    except: pass
+    return None
+
+# --- 8. Event คนเข้า ---
 @bot.chat_member_handler()
 def on_member_change(update):
-    if str(update.chat.id) == GROUP_ID_MONTHLY:
-        if update.new_chat_member.status in ['member', 'administrator', 'creator']:
-            if update.old_chat_member.status not in ['member', 'administrator', 'creator']:
-                
-                user = update.new_chat_member.user
-                if user.is_bot: return
+    if str(update.chat.id) != GROUP_ID_MONTHLY: return
 
-                now_thai = get_thai_time()
-                amount = get_user_payment_amount(user.id)
-                
-                if amount >= 2499:
-                    expiry_str, status_str = "-", "Permanent"
-                    msg = f"✅ ลูกค้า 2499 เข้ากลุ่ม: {user.first_name}\nสถานะ: ถาวร (VIP)"
-                elif amount >= 1299:
-                    expiry = now_thai + datetime.timedelta(days=90)
-                    expiry_str, status_str = format_date(expiry), "Active"
-                    msg = f"✅ ลูกค้า 1299 เข้ากลุ่ม: {user.first_name}\nสถานะ: 90 วัน"
-                else:
-                    expiry = now_thai + datetime.timedelta(days=30)
-                    expiry_str, status_str = format_date(expiry), "Active"
-                    msg = f"✅ ลูกค้า 300 เข้ากลุ่ม: {user.first_name}\nสถานะ: 30 วัน"
+    # เช็คเฉพาะคนเข้าใหม่
+    if update.new_chat_member.status in ['member', 'administrator', 'creator'] and \
+       update.old_chat_member.status not in ['member', 'administrator', 'creator']:
+        
+        user = update.new_chat_member.user
+        if user.is_bot: return
+        
+        print(f"👤 User Joined: {user.first_name} ({user.id})")
+        
+        now_thai = get_thai_time()
+        final_amount = 0
+        is_legacy_migration = False
+        legacy_info = {}
+        
+        renewal_row = None
+        is_renewal = False
 
-                global sheet
-                if sheet is None: sheet, _, _ = get_sheets()
-                
-                if sheet:
-                    try:
-                        existing_row = find_user_row_index(user.id)
-                        if existing_row:
-                            try:
-                                old_status = sheet.cell(existing_row, 5).value 
-                                if old_status == 'Permanent':
-                                    expiry_str, status_str = "-", "Permanent"
-                                    msg = f"👑 ลูกค้าเก่า (ถาวร) กลับมา: {user.first_name}\nสถานะ: ถาวร (คงสภาพเดิม)"
-                            except: pass
+        # STEP 1: เช็คสถานะใน Members2
+        existing_data = find_active_row_data(user.id)
+        if existing_data:
+            # 🛡️ แปลงเป็นตัวเล็กเพื่อป้องกันการพิมพ์ผิด (Active/active)
+            current_status = str(existing_data['status']).strip().lower()
+            if current_status in ['permanent', 'active']:
+                print(f"✅ User {user.first_name} is Active/Permanent. Skip.")
+                return
+            else:
+                print(f"🔄 User {user.first_name} is Expired. Checking for Renewal...")
+                renewal_row = existing_data['row']
+                is_renewal = True
 
-                            try:
-                                val_msg_id = sheet.cell(existing_row, 7).value 
-                                if val_msg_id: bot.delete_message(GROUP_ID_MONTHLY, int(val_msg_id))
-                            except: pass
+        # STEP 2: เช็คยอดเงินใหม่
+        payment_amount = check_new_payment(user.id)
+        
+        if payment_amount > 0:
+            final_amount = payment_amount
+            print(f"💰 Found New Payment: {final_amount}")
+        else:
+            # STEP 3: เช็คสิทธิ์เก่า (ถ้าไม่ใช่การต่ออายุ)
+            if not is_renewal:
+                legacy_data = check_legacy_data(user.id)
+                if legacy_data['found']:
+                    status = legacy_data['status']
+                    expiry_str = legacy_data['expiry_date']
+                    is_valid_legacy = False
+                    
+                    if status == 'Permanent':
+                        is_valid_legacy = True
+                        final_amount = 2500
+                    elif status == 'Active':
+                        try:
+                            exp_date = datetime.datetime.strptime(expiry_str, "%Y-%m-%d %H:%M:%S")
+                            exp_date = exp_date.replace(tzinfo=None)
+                            now_no_tz = now_thai.replace(tzinfo=None)
+                            if exp_date > now_no_tz:
+                                is_valid_legacy = True
+                                final_amount = 100
+                        except: pass
+                    
+                    if is_valid_legacy:
+                        is_legacy_migration = True
+                        legacy_info = legacy_data
+                        print(f"♻️ Valid Legacy User Found: {status}")
 
-                            sheet.update(f'C{existing_row}:G{existing_row}', [[format_date(now_thai), expiry_str, status_str, "", ""]])
-                            bot.send_message(GROUP_ID_ADMIN, f"{msg}\n(อัปเดตสมาชิกเดิม)")
-                        else:
-                            sheet.append_row([str(user.id), user.first_name, format_date(now_thai), expiry_str, status_str, "", ""])
-                            bot.send_message(GROUP_ID_ADMIN, f"{msg}\n(สมาชิกใหม่)")
-                    except Exception as e:
-                        print(f"Save Error: {e}")
+        # STEP 4: ตัดสินใจ
+        if final_amount == 0 and not is_legacy_migration:
+            print(f"🚫 Kicking {user.first_name}")
+            try:
+                bot.send_message(user.id, "❌ ไม่พบยอดเงิน หรือ สิทธิ์เดิมหมดอายุแล้ว\nกรุณาแจ้งสลิปใหม่")
+                bot.ban_chat_member(GROUP_ID_MONTHLY, user.id)
+                bot.unban_chat_member(GROUP_ID_MONTHLY, user.id)
+            except: pass
+            return
 
-# --- 8. Loop เช็ค + แจ้งเตือน ---
+        save_expiry_str = "-"
+        save_status = "Active"
+        msg_plan = ""
+
+        if is_legacy_migration:
+            save_expiry_str = legacy_info['expiry_date']
+            save_status = legacy_info['status']
+            msg_plan = f"Migrated ({save_status})"
+        else:
+            if final_amount >= 2499:
+                save_expiry_str = "-"
+                save_status = "Permanent"
+                msg_plan = "VVIP ถาวร"
+            elif final_amount >= 1299:
+                expiry = now_thai + datetime.timedelta(days=90)
+                save_expiry_str = format_date(expiry)
+                msg_plan = "90 วัน"
+            else:
+                expiry = now_thai + datetime.timedelta(days=30)
+                save_expiry_str = format_date(expiry)
+                msg_plan = "30 วัน"
+
+        # บันทึก
+        global sheet_active
+        if sheet_active is None: _, sheet_active, _ = get_sheets()
+
+        try:
+            if is_renewal and renewal_row:
+                # อัปเดตคนเดิม (Renewal)
+                sheet_active.update(f'D{renewal_row}:G{renewal_row}', [[save_expiry_str, save_status, "", ""]])
+                bot.send_message(GROUP_ID_ADMIN, f"✅ ต่ออายุสมาชิก: {user.first_name}\nPlan: {msg_plan}")
+                print(f"Updated renewal for {user.first_name}")
+            else:
+                # คนใหม่ / ย้ายบ้าน (Append)
+                join_date_save = legacy_info['join_date'] if is_legacy_migration else format_date(now_thai)
+                sheet_active.append_row([
+                    str(user.id),
+                    user.first_name,
+                    join_date_save,
+                    save_expiry_str,
+                    save_status,
+                    "", ""
+                ])
+                bot.send_message(GROUP_ID_ADMIN, f"✅ สมาชิกใหม่/ย้ายบ้าน: {user.first_name}\nPlan: {msg_plan}")
+                print(f"Appended new user {user.first_name}")
+            
+        except Exception as e:
+            print(f"❌ Save Error: {e}")
+
+# --- 9. Loop เช็ควันหมดอายุ ---
 def check_expiry_loop():
     print("⏳ Auto-Kick Loop Started...")
     while True:
         try:
-            global sheet
-            if sheet is None: sheet, _, _ = get_sheets()
-            if sheet:
-                records = sheet.get_all_records()
-                now = get_thai_time().replace(tzinfo=None)
+            global sheet_active
+            if sheet_active is None: _, sheet_active, _ = get_sheets()
+            
+            records = sheet_active.get_all_records()
+            now = get_thai_time().replace(tzinfo=None)
+            
+            for i, record in enumerate(records, start=2):
+                status = str(record.get('Status', '')).strip()
+                expiry_str = record.get('Expiry Date')
                 
-                for i, record in enumerate(records, start=2):
-                    if record['Status'] == 'Permanent' or record['Expiry Date'] in ["-", ""]: continue
-                    if record['Status'] != 'Active': continue
+                # 🛡️ ป้องกัน Human Error: แปลงเป็นตัวเล็กก่อนเช็ค
+                if status.lower() != 'active' or expiry_str in ['-', '']: continue
+                
+                try:
+                    exp_date = datetime.datetime.strptime(expiry_str, "%Y-%m-%d %H:%M:%S")
+                    uid = str(record.get('User ID'))
+                    name = record.get('Name')
+                    remaining = exp_date - now
+                    
+                    msg_id_str = str(record.get('Message ID', '')).strip()
+                    is_notified = str(record.get('Notified', '')).strip()
 
-                    try:
-                        exp_date = datetime.datetime.strptime(record['Expiry Date'], "%Y-%m-%d %H:%M:%S")
-                        uid = str(record['User ID'])
-                        name = record['Name']
-                        remaining_time = exp_date - now
-                        
-                        msg_id_str = str(record.get('Message ID', '')).strip()
-                        is_notified = str(record.get('Notified', '')).strip()
-                        
-                        # 1. แจ้งเตือน 2 วัน
-                        if datetime.timedelta(days=0) < remaining_time <= datetime.timedelta(days=2):
-                            if is_notified != 'Yes':
-                                try:
-                                    msg_group = (f"📢 <b>แจ้งเตือนใกล้หมดอายุ</b>\nถึง <a href='tg://user?id={uid}'>คุณ {name}</a>\n"
-                                                 f"เหลือเวลา {remaining_time.days} วัน {int(remaining_time.seconds/3600)} ชม.\n"
-                                                 f"หมดอายุ: {record['Expiry Date']}\n<i>ติดต่อแอดมินเพื่อต่ออายุก่อนโดนลบครับ</i>")
-                                    sent_msg = bot.send_message(GROUP_ID_MONTHLY, msg_group, parse_mode='HTML')
-                                    sheet.update(f'F{i}:G{i}', [['Yes', str(sent_msg.message_id)]])
-                                    time.sleep(1.5)
-                                except Exception as e: print(f"Notify Error: {e}")
-
-                        # 2. หมดเวลา
-                        if now > exp_date:
-                            amount = get_user_payment_amount(uid)
-                            if amount >= 2499:
-                                sheet.update_cell(i, 5, 'Permanent')
-                                sheet.update_cell(i, 4, '-')
-                                bot.send_message(GROUP_ID_ADMIN, f"👑 อัปเกรดเป็นถาวร: คุณ {name}")
-                                continue
+                    # 1. เตะคนหมดอายุ
+                    if now > exp_date:
+                        try:
+                            print(f"🔨 Kicking {name}...")
+                            bot.ban_chat_member(GROUP_ID_MONTHLY, uid)
+                            bot.unban_chat_member(GROUP_ID_MONTHLY, uid)
                             
+                            if msg_id_str:
+                                try: bot.delete_message(GROUP_ID_MONTHLY, int(msg_id_str))
+                                except: pass
+
+                            sheet_active.update_cell(i, 5, 'Expired')
+                            sheet_active.update_cell(i, 7, "")
+                            bot.send_message(GROUP_ID_ADMIN, f"🧹 เตะแล้ว: {name} (หมดอายุ)")
+                            
+                            time.sleep(1)
+                        except Exception as e:
+                            print(f"Kick Error: {e}")
+                            
+                    # 2. แจ้งเตือน (< 2 วัน)
+                    elif datetime.timedelta(days=0) < remaining <= datetime.timedelta(days=2):
+                        if is_notified != 'Yes':
+                            # 🛡️ ใช้ html.escape เพื่อกันชื่อที่มีอักขระแปลกๆ
+                            safe_name = html.escape(name)
+                            msg = (f"📢 <b>แจ้งเตือนใกล้หมดอายุ</b>\nถึง <a href='tg://user?id={uid}'>คุณ {safe_name}</a>\n"
+                                   f"เหลือเวลา {remaining.days} วัน {int(remaining.seconds/3600)} ชม.\n"
+                                   f"หมดอายุ: {expiry_str}\n<i>ติดต่อแอดมินเพื่อต่ออายุครับ</i>")
                             try:
-                                if msg_id_str:
-                                    try: bot.delete_message(GROUP_ID_MONTHLY, int(msg_id_str))
-                                    except: pass
-
-                                bot.ban_chat_member(GROUP_ID_MONTHLY, uid)
-                                bot.unban_chat_member(GROUP_ID_MONTHLY, uid)
-                                sheet.update_cell(i, 5, 'Expired')
-                                sheet.update_cell(i, 7, "")
-                                bot.send_message(GROUP_ID_ADMIN, f"🧹 เตะแล้ว: {name} (หมดอายุ)")
-                                time.sleep(1.5)
-                            except Exception as e: print(f"Kick Error: {e}")
-
-                    except: continue
+                                sent = bot.send_message(GROUP_ID_MONTHLY, msg, parse_mode='HTML')
+                                sheet_active.update(f'F{i}:G{i}', [['Yes', str(sent.message_id)]])
+                                time.sleep(1)
+                            except: pass
+                            
+                except ValueError: continue 
+                except Exception as inner_e: print(f"Row Error: {inner_e}")
+                
             time.sleep(60)
-        except: time.sleep(60)
+        except Exception as e:
+            print(f"Loop Error: {e}")
+            time.sleep(60)
 
 if __name__ == "__main__":
     t1 = threading.Thread(target=check_expiry_loop)
